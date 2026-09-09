@@ -15,7 +15,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: 10.0.x
 
       - name: Install zip
         uses: montudor/action-zip@v1
@@ -30,14 +30,14 @@ jobs:
         run: dotnet publish ./src/RekhtaDownloader.Console/RekhtaDownloader.Console.csproj -r win-x64 -c Release --self-contained
 
       - name: Zip  win-x64 artifacts
-        working-directory: ./src/RekhtaDownloader.Console/bin/Release/net8.0/win-x64/publish
+        working-directory: ./src/RekhtaDownloader.Console/bin/Release/net10.0/win-x64/publish
         run: zip -qq -r release-win-x64-1.1.${{ github.run_number }}.zip .
 
       - name: Publish win-x86 App
         run: dotnet publish ./src/RekhtaDownloader.Console/RekhtaDownloader.Console.csproj -r win-x86 -c Release --self-contained
 
       - name: Zip  win-x86 artifacts
-        working-directory: ./src/RekhtaDownloader.Console/bin/Release/net8.0/win-x86/publish
+        working-directory: ./src/RekhtaDownloader.Console/bin/Release/net10.0/win-x86/publish
         run: zip -qq -r release-win-x86-1.1.${{ github.run_number }}.zip .
 
       - name: Create Release
@@ -57,7 +57,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./src/RekhtaDownloader.Console/bin/Release/net8.0/win-x64/publish/release-win-x64-1.1.${{ github.run_number }}.zip
+          asset_path: ./src/RekhtaDownloader.Console/bin/Release/net10.0/win-x64/publish/release-win-x64-1.1.${{ github.run_number }}.zip
           asset_name: release-win-x64-1.1.${{ github.run_number }}.zip
           asset_content_type: application/zip
 
@@ -67,6 +67,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./src/RekhtaDownloader.Console/bin/Release/net8.0/win-x86/publish/release-win-x86-1.1.${{ github.run_number }}.zip
+          asset_path: ./src/RekhtaDownloader.Console/bin/Release/net10.0/win-x86/publish/release-win-x86-1.1.${{ github.run_number }}.zip
           asset_name: release-win-x86-1.1.${{ github.run_number }}.zip
           asset_content_type: application/zip
