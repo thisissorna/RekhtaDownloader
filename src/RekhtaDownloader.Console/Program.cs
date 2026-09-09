@@ -41,12 +41,18 @@ namespace RekhtaDownloader.Console
                 getDefaultValue: () => false);
             infoOption.AddAlias("-i");
 
+            var qualityOption = new Option<int>(
+                name: "--quality",
+                description: "JPEG quality (1-100) to use when saving page images. Lower values produce smaller files.",
+                getDefaultValue: () => 90);
+            qualityOption.AddAlias("-q");
 
             var rootCommand = new RootCommand("Rekhta download tool to download the rekhta books.");
             rootCommand.AddOption(urlOption);
             rootCommand.AddOption(tasksOption);
             rootCommand.AddOption(outputOption);
             rootCommand.AddOption(infoOption);
+            rootCommand.AddOption(qualityOption);
 
             rootCommand.SetHandler(async (context) =>
             {
@@ -54,6 +60,7 @@ namespace RekhtaDownloader.Console
                 int tasks= context.ParseResult.GetValueForOption(tasksOption);
                 OutputType output = context.ParseResult.GetValueForOption(outputOption);
                 bool infoOnly = context.ParseResult.GetValueForOption(infoOption);
+                int quality = context.ParseResult.GetValueForOption(qualityOption);
                 var token = context.GetCancellationToken();
 
                 if (infoOnly)
@@ -62,7 +69,7 @@ namespace RekhtaDownloader.Console
                 }
                 else
                 {
-                    await DownloadBook(url, tasks, output, token);
+                    await DownloadBook(url, tasks, output, quality, token);
                 }
             });
 
@@ -71,12 +78,12 @@ namespace RekhtaDownloader.Console
             return 0;
         }
 
-        private static async Task DownloadBook(string bookUrl, int taskCount, OutputType outputType, CancellationToken token)
+        private static async Task DownloadBook(string bookUrl, int taskCount, OutputType outputType, int quality, CancellationToken token)
         {
             //var bookUrl = "https://rekhta.org/ebooks/alfaz-shumara-number-000-jameel-akhtar-magazines-7/";
 
             await new BookExporter(LoggingFactory.CreateLogger(nameof(RekhtaDownloader)))
-                .DownloadBook(bookUrl, taskCount, outputType,  null, token);
+                .DownloadBook(bookUrl, taskCount, outputType, null, quality, token);
         }
 
         private static async Task GetBookInfo(string bookUrl, CancellationToken token)

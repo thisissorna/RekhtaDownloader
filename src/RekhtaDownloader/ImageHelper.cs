@@ -1,4 +1,5 @@
-﻿using RekhtaDownloader.Models;
+﻿using System;
+using RekhtaDownloader.Models;
 using SkiaSharp;
 
 namespace RekhtaDownloader
@@ -47,12 +48,12 @@ namespace RekhtaDownloader
             int width = (int)(image.Width * ((double)scaleFactor / 10));
             int height = (int)(image.Height * ((double)scaleFactor / 10));
             using (var surface = SKSurface.Create(new SKImageInfo
-                   {
-                       Width = width,
-                       Height = height,
-                       ColorType = SKImageInfo.PlatformColorType,
-                       AlphaType = SKAlphaType.Opaque
-                   }))
+            {
+                Width = width,
+                Height = height,
+                ColorType = SKImageInfo.PlatformColorType,
+                AlphaType = SKAlphaType.Opaque
+            }))
             using (var paint = new SKPaint())
             {
                 paint.IsAntialias = true;
@@ -65,9 +66,18 @@ namespace RekhtaDownloader
             }
         }
 
-        public static byte[] ToByteArray(this SKImage img)
+        public static byte[] ToByteArray(this SKImage img, int quality = 90)
         {
-            return img.Encode().ToArray();
+            using (var bitmap = SKBitmap.FromImage(img))
+            using (var data = bitmap.Encode(SKEncodedImageFormat.Jpeg, quality))
+            {
+                if (data == null)
+                {
+                    throw new InvalidOperationException("Failed to encode image as JPEG.");
+                }
+
+                return data.ToArray();
+            }
         }
     }
 }

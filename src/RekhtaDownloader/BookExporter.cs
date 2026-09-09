@@ -28,13 +28,13 @@ namespace RekhtaDownloader
         public async Task<BookInfo> GetBookInformation(string bookUrl, CancellationToken token = default(CancellationToken))
         {
             var url = new Uri(bookUrl);
-            var book = new Book(url.GetLeftPart(UriPartial.Path), 1, _logger, token);
+            var book = new Book(url.GetLeftPart(UriPartial.Path), 1, _logger, 90, token);
             return await book.GetBookInformation();
         }
 
-        public async Task<string> DownloadBook(string bookUrl, int taskCount = 10, OutputType output = OutputType.Pdf, string outputPath = null, CancellationToken token = default(CancellationToken))
+        public async Task<string> DownloadBook(string bookUrl, int taskCount = 10, OutputType output = OutputType.Pdf, string outputPath = null, int imageQuality = 90, CancellationToken token = default(CancellationToken))
         {
-            var book = new Book(bookUrl, taskCount, _logger, token);
+            var book = new Book(bookUrl, taskCount, _logger, imageQuality, token);
             var workingFolder = outputPath ?? Environment.CurrentDirectory;
             await book.DownloadBook(workingFolder);
 

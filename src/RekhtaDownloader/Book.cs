@@ -21,6 +21,7 @@ namespace RekhtaDownloader
 
         private string _bookUrl;
         private readonly int _threadCount;
+        private readonly int _imageQuality;
         private readonly ILogger _logger;
         private readonly CancellationToken _cancellationToken;
 
@@ -37,12 +38,13 @@ namespace RekhtaDownloader
 
         private string _outputDirectory = String.Empty;
 
-        public Book(string bookUrl, int threadCount, ILogger logger, CancellationToken cancellationToken)
+        public Book(string bookUrl, int threadCount, ILogger logger, int imageQuality, CancellationToken cancellationToken)
         {
             _bookUrl = bookUrl;
             _threadCount = threadCount;
             _logger = logger;
             _cancellationToken = cancellationToken;
+            _imageQuality = imageQuality;
         }
 
         public async Task<BookInfo> GetBookInformation()
@@ -72,7 +74,7 @@ namespace RekhtaDownloader
                 {
                     bookinfo.Authors = new[] { item.QuerySelector("p > span > a")?.NextSibling?.InnerText?.Trim() };
                 }
-                else if(type.Contains("PUBLISHER"))
+                else if (type.Contains("PUBLISHER"))
                 {
                     bookinfo.Publisher = item.QuerySelector("p > span")?.InnerText?.Trim();
                 }
@@ -178,7 +180,7 @@ namespace RekhtaDownloader
                     _outputDirectory.CreateIfDirectoryDoesNotExists();
                     filePath.MakeSureFileDoesNotExist();
 
-                    File.WriteAllBytes(filePath, pageImage.ToByteArray());
+                    File.WriteAllBytes(filePath, pageImage.ToByteArray(_imageQuality));
 
                     page.PageImagePath = filePath;
 
