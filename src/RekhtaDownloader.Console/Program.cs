@@ -1,4 +1,5 @@
-﻿using System.CommandLine;
+﻿using System;
+using System.CommandLine;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,79 +17,94 @@ namespace RekhtaDownloader.Console
         );
 
     public static async Task<int> Main(string[] args)
+    {
+        Option<string> urlOption = new("--url")
         {
-            var urlOption = new Option<string>(
-                name: "--url",
-                description: "Url the book page where you can read the book contents.")
-                { IsRequired = true };
-            urlOption.AddAlias("-u");
+            Description = "Url the book page where you can read the book contents.",
+            Required = true,
+            Aliases = { "-u" }
+        };
 
-            var tasksOption = new Option<int>(
-                name: "--tasks",
-                description: "Number of parallel pages to get. Default will be 10 pages.",
-                getDefaultValue: () => 10);
-            tasksOption.AddAlias("-t");
+        Option<int> tasksOption = new("--tasks")
+        {
+            Description = "Number of parallel pages to get. Default will be 10 pages.",
+            DefaultValueFactory = _ => 10,
+            Aliases = { "-t" }
+        };
 
-            var outputOption = new Option<OutputType>(
-                name: "--output",
-                description: "Type of output to be generated.",
-                getDefaultValue: () => OutputType.Pdf);
-            outputOption.AddAlias("-o");
+        Option<OutputType> outputOption = new("--output")
+        {
+            Description =
+                "Type of output to be generated.",
+            DefaultValueFactory =
+                _ => OutputType.Pdf,
+            Aliases = { "-o" }
+        };
 
-            var infoOption = new Option<bool>(
-                name: "--info",
-                description: "Tells if only book information is to be read. No download of book would be done if this option is selected.",
-                getDefaultValue: () => false);
-            infoOption.AddAlias("-i");
+        Option<bool> infoOption = new("--info")
+        {
+            Description =
+                "Tells if only book information is to be read. No download of book would be done if this option is selected.",
+            DefaultValueFactory = _ => false,
+            Aliases = { "-i" }
+        };
 
-            var qualityOption = new Option<int>(
-                name: "--quality",
-                description: "JPEG quality (1-100) to use when saving page images. Lower values produce smaller files.",
-                getDefaultValue: () => 90);
-            qualityOption.AddAlias("-q");
+        Option<int> qualityOption = new("--quality")
+        {
+            Description = "JPEG quality (1-100) to use when saving page images. Lower values produce smaller files.",
+            DefaultValueFactory = _ => 90,
+            Aliases = { "-q" }
+        };
 
             var rootCommand = new RootCommand("Rekhta download tool to download the rekhta books.");
-            rootCommand.AddOption(urlOption);
-            rootCommand.AddOption(tasksOption);
-            rootCommand.AddOption(outputOption);
-            rootCommand.AddOption(infoOption);
-            rootCommand.AddOption(qualityOption);
+            rootCommand.Options.Add(urlOption);
+            rootCommand.Options.Add(tasksOption);
+            rootCommand.Options.Add(outputOption);
+            rootCommand.Options.Add(infoOption);
+            rootCommand.Options.Add(qualityOption);
 
-            rootCommand.SetHandler(async (context) =>
+            ParseResult parseResult = rootCommand.Parse(args);
+            
+            rootCommand.SetAction(async (result, cancellationToken) =>
             {
-                string url = context.ParseResult.GetValueForOption(urlOption);
-                int tasks= context.ParseResult.GetValueForOption(tasksOption);
-                OutputType output = context.ParseResult.GetValueForOption(outputOption);
-                bool infoOnly = context.ParseResult.GetValueForOption(infoOption);
-                int quality = context.ParseResult.GetValueForOption(qualityOption);
-                var token = context.GetCancellationToken();
+                if (result.Errors.Count == 0 && Uri.TryCreate(result.GetValue(urlOption), UriKind.Absolute, out var uriResult))
+                {
+                    string url = result.GetValue(urlOption);
+                    int tasks = result.GetValue(tasksOption);
+                    OutputType output = result.GetValue(outputOption);
+                    bool infoOnly = result.GetValue(infoOption);
+                    int quality = result.GetValue(qualityOption);
 
-                if (infoOnly)
-                {
-                    await GetBookInfo(url, token);
+                    if (infoOnly)
+                    {
+                        await GetBookInfo(url, cancellationToken);
+                    }
+                    else
+                    {
+                        await DownloadBook(url, tasks, output, quality, cancellationToken);
+                    }
                 }
-                else
-                {
-                    await DownloadBook(url, tasks, output, quality, token);
-                }
+                
+                return 0;
             });
-
-            await rootCommand.InvokeAsync(args);
-
-            return 0;
+            
+            foreach (var parseError in parseResult.Errors)
+            {
+                await System.Console.Error.WriteLineAsync(parseError.Message);
+                return 1;
+            }
+            
+            return await rootCommand.Parse(args).InvokeAsync();
         }
 
         private static async Task DownloadBook(string bookUrl, int taskCount, OutputType outputType, int quality, CancellationToken token)
         {
-            //var bookUrl = "https://rekhta.org/ebooks/alfaz-shumara-number-000-jameel-akhtar-magazines-7/";
-
             await new BookExporter(LoggingFactory.CreateLogger(nameof(RekhtaDownloader)))
                 .DownloadBook(bookUrl, taskCount, outputType, null, quality, token);
         }
 
         private static async Task GetBookInfo(string bookUrl, CancellationToken token)
         {
-            //var bookUrl = "https://www.rekhta.org/ebooks/detail/patras-ke-mazameen-patras-bukhari-ebooks-2?lang=ur";
             var logger = LoggingFactory.CreateLogger(nameof(RekhtaDownloader));
             var bookInfo = await new BookExporter(logger).GetBookInformation(bookUrl, token);
             if (bookInfo != null)

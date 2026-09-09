@@ -33,7 +33,7 @@ namespace RekhtaDownloader
                         targetY + cellSize + borderWidth);
 
                     // Draw the image from source to target
-                    canvas.DrawBitmap(sourceBitmap, sourceRect, targetRect);
+                    canvas.DrawBitmap(sourceBitmap, sourceRect, targetRect, new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.None));
                 }
 
                 // Ensure the canvas drawing operations are completed
@@ -57,9 +57,9 @@ namespace RekhtaDownloader
             using (var paint = new SKPaint())
             {
                 paint.IsAntialias = true;
-                paint.FilterQuality = SKFilterQuality.High;
 
-                surface.Canvas.DrawImage(image, new SKRectI(0, 0, width, height), paint);
+                var sampling = new SKSamplingOptions(SKCubicResampler.Mitchell);
+                surface.Canvas.DrawImage(image, new SKRect(0, 0, width, height), sampling, paint);
                 surface.Canvas.Flush();
 
                 return surface.Snapshot();
