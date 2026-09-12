@@ -9,7 +9,7 @@ on:
 jobs:
   build:
     permissions:
-      contents: read
+      contents: write  # needed to create the release and upload assets
       id-token: write  # enable GitHub OIDC token issuance for this job
     runs-on: ubuntu-latest
 
@@ -26,17 +26,6 @@ jobs:
       - name: Build
         run: dotnet build ./src/RekhtaDownloader/RekhtaDownloader.csproj --configuration Release -p:Version=1.1.${{ github.run_number }}
 
-       # Get a short-lived NuGet API key
-      - name: NuGet login (OIDC → temp API key)
-        uses: NuGet/login@v1
-        id: login
-        with:
-          user:  ${{ secrets.NUGET_USER }} # Recommended: use a secret like ${{ secrets.NUGET_USER }} for your nuget.org username (profile name), NOT your email address
-    
-      # Push the package
-      - name: NuGet push
-        run: dotnet nuget push src/RekhtaDownloader/bin/Release/*.nupkg --api-key ${{steps.login.outputs.NUGET_API_KEY}} --source https://api.nuget.org/v3/index.json --skip-duplicate
-        
       - name: Publish win-x64 App
         run: dotnet publish ./src/RekhtaDownloader.Console/RekhtaDownloader.Console.csproj -r win-x64 -c Release --self-contained
 
@@ -51,33 +40,26 @@ jobs:
         working-directory: ./src/RekhtaDownloader.Console/bin/Release/net10.0/win-x86/publish
         run: zip -qq -r release-win-x86-1.1.${{ github.run_number }}.zip .
 
-      - name: Create Release
-        uses: actions/create-release@v1
-        id: create_release
+      - name: Create Release and upload artifacts
+        uses: softprops/action-gh-release@v2
         with:
           draft: false
           prerelease: false
-          release_name: 1.1.${{ github.run_number }}
+          name: 1.1.${{ github.run_number }}
           tag_name: 1.1.${{ github.run_number }}
+          files: |
+            ./src/RekhtaDownloader.Console/bin/Release/net10.0/win-x64/publish/release-win-x64-1.1.${{ github.run_number }}.zip
+            ./src/RekhtaDownloader.Console/bin/Release/net10.0/win-x86/publish/release-win-x86-1.1.${{ github.run_number }}.zip
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
-      - name: Upload windows x64 artifact
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+       # Get a short-lived NuGet API key
+      - name: NuGet login (OIDC → temp API key)
+        uses: NuGet/login@v1
+        id: login
         with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./src/RekhtaDownloader.Console/bin/Release/net10.0/win-x64/publish/release-win-x64-1.1.${{ github.run_number }}.zip
-          asset_name: release-win-x64-1.1.${{ github.run_number }}.zip
-          asset_content_type: application/zip
+          user:  ${{ secrets.NUGET_USER }} # Recommended: use a secret like ${{ secrets.NUGET_USER }} for your nuget.org username (profile name), NOT your email address
 
-      - name: Upload windows x86 artifact
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./src/RekhtaDownloader.Console/bin/Release/net10.0/win-x86/publish/release-win-x86-1.1.${{ github.run_number }}.zip
-          asset_name: release-win-x86-1.1.${{ github.run_number }}.zip
-          asset_content_type: application/zip
+      # Push the package
+      - name: NuGet push
+        run: dotnet nuget push src/RekhtaDownloader/bin/Release/*.nupkg --api-key ${{steps.login.outputs.NUGET_API_KEY}} --source https://api.nuget.org/v3/index.json --skip-duplicate
