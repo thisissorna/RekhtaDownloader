@@ -35,7 +35,7 @@ jobs:
     
       # Push the package
       - name: NuGet push
-        run: dotnet nuget push artifacts/my-sdk.nupkg --api-key ${{steps.login.outputs.NUGET_API_KEY}} --source https://api.nuget.org/v3/index.json
+        run: dotnet nuget push src/RekhtaDownloader/bin/Release/*.nupkg --api-key ${{steps.login.outputs.NUGET_API_KEY}} --source https://api.nuget.org/v3/index.json --skip-duplicate
         
       - name: Publish win-x64 App
         run: dotnet publish ./src/RekhtaDownloader.Console/RekhtaDownloader.Console.csproj -r win-x64 -c Release --self-contained
