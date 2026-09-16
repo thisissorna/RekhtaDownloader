@@ -63,6 +63,40 @@ var downloader = new BookExporter(new ConsoleLogger());
 var bookInfo = await downloader.GetBookInformation(bookUrl, CancellationToken.None);
 ```
 
+### Streaming, resumable page download
+
+For long-running or memory-constrained callers (for example a Lambda function that uploads each
+page to another API as it arrives), use `GetBookInfoAsync` and `DownloadPagesAsync` instead of
+`DownloadBook`. This lets you bound memory to a fixed number of pages in flight and resume a
+download from a specific page in a later process, without re-fetching book metadata or already
+handled page-id batches.
+
+``` c#
+var downloader = new BookExporter(new ConsoleLogger());
+
+// Called once, ever, per book. Persist the returned BookInfo (it's a plain serializable record)
+// so a later run can resume without fetching book metadata again.
+var bookInfo = await downloader.GetBookInfoAsync(bookUrl, CancellationToken.None);
+
+await foreach (var page in downloader.DownloadPagesAsync(bookUrl, bookInfo, startPage: resumeFrom, taskCount: 2, CancellationToken.None))
+{
+    await UploadSomewhereAsync(page.PageNumber, page.ImageStream, page.ContentType);
+    // Checkpoint page.PageNumber (e.g. to a database) so a future run can resume with
+    // startPage: page.PageNumber + 1. Dispose page.ImageStream once you're done with it -
+    // the enumerator does not keep more than `taskCount` pages' worth of image data alive.
+}
+```
+
+- `startPage` is `1` for a fresh download, or `N + 1` to resume after page `N`.
+- `taskCount` bounds how many pages are downloading or buffered awaiting consumption at once,
+  regardless of book length.
+- If `taskCount > 1`, pages may arrive out of numeric order; use `page.PageNumber` to know which
+  page you received.
+- Stopping enumeration early (`break`, or cancelling the token) cleanly stops further downloads -
+  there's no separate pause method.
+
+`DownloadBook` is implemented in terms of these two methods and its behaviour is unchanged.
+
 ## CLI application
 
 The repository also includes a console application, `RekhtaDownloader.Console`, which wraps `BookExporter` for command line use.
