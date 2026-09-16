@@ -1,9 +1,11 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using Common;
 using HtmlAgilityPack.CssSelectors.NetCore;
@@ -15,17 +17,15 @@ namespace RekhtaDownloader
 {
     internal class Book
     {
-        private readonly List<Page> _pages = new List<Page>();
+        private const int PageIdBatchSize = 40;
 
-        private readonly BlockingCollection<Page> _jobs = new BlockingCollection<Page>();
+        private readonly List<Page> _pages = new List<Page>();
 
         private string _bookUrl;
         private readonly int _threadCount;
         private readonly int _imageQuality;
         private readonly ILogger _logger;
         private readonly CancellationToken _cancellationToken;
-
-        private int _pageCount;
 
         private string BookId { get; set; }
         public string BookName { get; private set; }
@@ -47,24 +47,45 @@ namespace RekhtaDownloader
             _imageQuality = imageQuality;
         }
 
-        public async Task<BookInfo> GetBookInformation()
+        public async Task<Models.BookInfo> GetBookInformation()
         {
             await CheckDetailsPageAndResolveBookPage();
             var pageContents = await HttpHelper.GetTextBody(_bookUrl);
             var document = new HtmlAgilityPack.HtmlDocument();
             document.LoadHtml(pageContents);
             var docNode = document.DocumentNode;
-            var title = docNode.QuerySelector(".AddInfoWrap > .B-descript > h5")?.InnerText?.Trim();
             var imageUrl = docNode.QuerySelector(".AddInfoWrap > .addINFOimg > img")?.GetAttributeValue<string>("src", null);
-            var bookinfo = new BookInfo
+
+            var (title, author, publisher, year) = ParseBookDetails(pageContents);
+            var bookinfo = new Models.BookInfo
             {
                 Title = title,
+                Authors = author != null ? new[] { author } : null,
+                Publisher = publisher,
+                Year = year,
             };
             if (!string.IsNullOrWhiteSpace(imageUrl))
             {
                 var bitmap = await HttpHelper.GetImage(imageUrl);
                 bookinfo.Image = bitmap.ToByteArray();
             }
+
+            return bookinfo;
+        }
+
+        // Shared by GetBookInformation() and GetBookInfoAsync(), both of which scrape the same
+        // ".AddInfoWrap" book-details markup from the (possibly already-fetched) page HTML.
+        private (string Title, string Author, string Publisher, int Year) ParseBookDetails(string pageContents)
+        {
+            var document = new HtmlAgilityPack.HtmlDocument();
+            document.LoadHtml(pageContents);
+            var docNode = document.DocumentNode;
+
+            var title = docNode.QuerySelector(".AddInfoWrap > .B-descript > h5")?.InnerText?.Trim();
+            string author = null;
+            string publisher = null;
+            var year = 0;
+
             var infos = docNode.QuerySelectorAll(".AddInfoWrap > .B-descript > ul > li");
             foreach (var item in infos)
             {
@@ -72,53 +93,181 @@ namespace RekhtaDownloader
 
                 if (type.Contains("AUTHOR"))
                 {
-                    bookinfo.Authors = new[] { item.QuerySelector("p > span > a")?.NextSibling?.InnerText?.Trim() };
+                    author = item.QuerySelector("p > span > a")?.NextSibling?.InnerText?.Trim();
                 }
                 else if (type.Contains("PUBLISHER"))
                 {
-                    bookinfo.Publisher = item.QuerySelector("p > span")?.InnerText?.Trim();
+                    publisher = item.QuerySelector("p > span")?.InnerText?.Trim();
                 }
                 else if (type.Contains("YEAR"))
                 {
                     var yearText = item.QuerySelector("p > span")?.InnerText?.Trim();
-                    if (int.TryParse(yearText, out var year))
+                    if (int.TryParse(yearText, out var parsedYear))
                     {
-                        bookinfo.Year = year;
+                        year = parsedYear;
                     }
                 }
             }
 
-            return bookinfo;
+            return (title, author, publisher, year);
+        }
+
+        // Fetches book metadata (title/author/publisher plus the internal ids needed to download
+        // pages) in a single request. This is the only method that hits the book page for
+        // metadata - the returned BookInfo carries everything DownloadPagesAsync needs so it
+        // never has to be re-fetched, which is what makes resuming a download cheap.
+        public async Task<RekhtaDownloader.BookInfo> GetBookInfoAsync()
+        {
+            await CheckDetailsPageAndResolveBookPage();
+            var pageContents = await HttpHelper.GetTextBody(_bookUrl);
+
+            var imageFolderName = FindTextBetween(pageContents, "Critique_id = \"", ";")?.Trim().Trim('"', '\'');
+            var bookId = FindTextBetween(pageContents, "var bookId = \"", "\";")?.Trim().Trim('"', '\'');
+            var actualUrl = FindTextBetween(pageContents, "var actualUrl =", ";")?.Trim().Trim('"', '\'');
+            var slug = actualUrl?.ToLower().Replace("/ebooks/", "").Trim().Trim('/', '\\');
+            var pageCount = int.Parse(FindTextBetween(pageContents, "var totalPageCount =", ";")?.Trim().Trim('"', '\'') ?? throw new InvalidOperationException("Unable to parse total page count"));
+            var pageFileNames = StringToStringArray(FindTextBetween(pageContents, "var pages = [", "];"));
+
+            var (title, author, publisher, _) = ParseBookDetails(pageContents);
+
+            return new RekhtaDownloader.BookInfo(
+                BookUrl: _bookUrl,
+                TitleUr: string.IsNullOrWhiteSpace(title) ? slug : title,
+                AuthorNameUr: author,
+                PublisherNameUr: publisher,
+                TotalPages: pageCount,
+                BookId: bookId,
+                Slug: slug,
+                ImageFolderName: imageFolderName,
+                PageFileNames: pageFileNames);
+        }
+
+        // Streams pages starting at startPage, fetching the 40-page id batches lazily as the
+        // enumeration reaches them and bounding concurrent downloads to taskCount. Stopping
+        // enumeration early (break / cancellation) cleanly stops further downloads.
+        public async IAsyncEnumerable<PageResult> DownloadPagesAsync(
+            RekhtaDownloader.BookInfo bookInfo,
+            int startPage,
+            int taskCount,
+            [EnumeratorCancellation] CancellationToken ct = default)
+        {
+            if (bookInfo == null) throw new ArgumentNullException(nameof(bookInfo));
+            if (startPage < 1) throw new ArgumentOutOfRangeException(nameof(startPage));
+            if (taskCount < 1) throw new ArgumentOutOfRangeException(nameof(taskCount));
+
+            var totalPages = bookInfo.TotalPages;
+            if (startPage > totalPages)
+            {
+                yield break;
+            }
+
+            // One lazily-started fetch task per 40-page batch, shared across concurrently
+            // downloading pages that happen to land in the same batch.
+            var pageIdBatchTasks = new ConcurrentDictionary<int, Task<string[]>>();
+
+            async Task<string> GetPageIdAsync(int pageIndex, CancellationToken token)
+            {
+                var batchIndex = pageIndex / PageIdBatchSize;
+                var batchTask = pageIdBatchTasks.GetOrAdd(
+                    batchIndex,
+                    bi => GetPageIdsBatchAsync(bookInfo.Slug, bi * PageIdBatchSize, totalPages, token));
+                var ids = await batchTask;
+                return ids[pageIndex - batchIndex * PageIdBatchSize];
+            }
+
+            // Bounded to taskCount so at most taskCount pages are buffered awaiting consumption
+            // on top of the taskCount pages Parallel.ForEachAsync has in flight downloading below.
+            var channel = Channel.CreateBounded<PageResult>(new BoundedChannelOptions(taskCount) { SingleReader = true });
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+
+            var producer = Task.Run(async () =>
+            {
+                try
+                {
+                    var pageIndexes = Enumerable.Range(startPage - 1, totalPages - (startPage - 1));
+                    await Parallel.ForEachAsync(
+                        pageIndexes,
+                        new ParallelOptions { MaxDegreeOfParallelism = taskCount, CancellationToken = cts.Token },
+                        async (pageIndex, token) =>
+                        {
+                            var pageId = await GetPageIdAsync(pageIndex, token);
+                            var fileName = bookInfo.PageFileNames[pageIndex];
+                            var bytes = await DownloadPageBytesAsync(pageId, pageIndex, bookInfo, fileName, token);
+                            await channel.Writer.WriteAsync(
+                                new PageResult(pageIndex + 1, totalPages, new MemoryStream(bytes), "image/jpeg"),
+                                token);
+                        });
+                    channel.Writer.TryComplete();
+                }
+                catch (Exception ex)
+                {
+                    channel.Writer.TryComplete(ex);
+                }
+            }, cts.Token);
+
+            try
+            {
+                await foreach (var page in channel.Reader.ReadAllAsync(ct))
+                {
+                    yield return page;
+                }
+            }
+            finally
+            {
+                cts.Cancel();
+                try
+                {
+                    await producer;
+                }
+                catch
+                {
+                    // The consumer has already stopped enumerating; nothing left to report to.
+                }
+            }
         }
 
         public async Task DownloadBook(string outputPath)
         {
-            await CheckDetailsPageAndResolveBookPage();
-            var pageContents = await HttpHelper.GetTextBody(_bookUrl);
-            var imageFolderName = FindTextBetween(pageContents, "Critique_id = \"", ";")?.Trim().Trim('"', '\'');
+            var bookInfo = await GetBookInfoAsync();
 
-            BookId = FindTextBetween(pageContents, "var bookId = \"", "\";")?.Trim().Trim('"', '\'');
-            var actualUrl = FindTextBetween(pageContents, "var actualUrl =", ";")?.Trim().Trim('"', '\'');
-            BookName = actualUrl?.ToLower().Replace("/ebooks/", "").Trim().Trim('/', '\\');
-            _logger.LogInformation($"Book Name : {BookName}");
-
-            _pageCount = int.Parse(FindTextBetween(pageContents, "var totalPageCount =", ";")?.Trim().Trim('"', '\'') ?? throw new InvalidOperationException("Unable to parse total page count"));
-            _logger.LogInformation($"Page Count: {_pageCount}");
-            _outputDirectory = Path.Combine(outputPath, imageFolderName.ToSafeFilename());
-
+            BookName = bookInfo.Slug;
+            BookId = bookInfo.BookId;
+            _outputDirectory = Path.Combine(outputPath, bookInfo.ImageFolderName.ToSafeFilename());
             _outputDirectory.EnsureEmptyDirectory();
 
-            var pages = StringToStringArray(FindTextBetween(pageContents, "var pages = [", "];"));
-            var pageIds = GetPageIds(BookName, pages.Length, _logger, _cancellationToken);
-            var tasks = new ConsumerStarter().StartAsyncConsumers(_threadCount, _cancellationToken, DownloadPage);
+            _logger.LogInformation($"Book Name : {BookName}");
+            _logger.LogInformation($"Page Count: {bookInfo.TotalPages}");
 
-            for (var i = 0; i < _pageCount; i++)
+            await foreach (var page in DownloadPagesAsync(bookInfo, 1, _threadCount, _cancellationToken))
             {
-                _jobs.Add(new Page { Index = i, PageId = pageIds[i], FolderName = imageFolderName, PageNumber = Path.GetFileNameWithoutExtension(pages[i]), FileName = pages[i] }, _cancellationToken);
-            }
+                using (page.ImageStream)
+                {
+                    var fileName = bookInfo.PageFileNames[page.PageNumber - 1];
+                    var filePath = Path.Combine(_outputDirectory, fileName);
+                    _outputDirectory.CreateIfDirectoryDoesNotExists();
+                    filePath.MakeSureFileDoesNotExist();
 
-            _jobs.CompleteAdding();
-            Task.WaitAll(tasks.ToArray(), _cancellationToken);
+                    using (var fileStream = File.Create(filePath))
+                    {
+                        await page.ImageStream.CopyToAsync(fileStream, _cancellationToken);
+                    }
+
+                    lock (_lock)
+                    {
+                        _pages.Add(new Page
+                        {
+                            Index = page.PageNumber - 1,
+                            PageId = null,
+                            FolderName = bookInfo.ImageFolderName,
+                            PageNumber = Path.GetFileNameWithoutExtension(fileName),
+                            FileName = fileName,
+                            PageImagePath = filePath,
+                        });
+                        _completeCount++;
+                        _logger.LogInformation($"Downloaded page {_completeCount} of {page.TotalPages}");
+                    }
+                }
+            }
         }
 
         private async Task CheckDetailsPageAndResolveBookPage()
@@ -143,55 +292,32 @@ namespace RekhtaDownloader
             }
         }
 
-        private string[] GetPageIds(string bookSlug, int pagesCount,
-            ILogger logger,
-            CancellationToken cancellationToken)
+        private async Task<string[]> GetPageIdsBatchAsync(string bookSlug, int batchStart, int pagesCount, CancellationToken cancellationToken)
         {
-            var pageIds = new List<string>();
-            int batchSize = 40;
-            for (int i = 0; i < pagesCount; i = i + batchSize)
-            {
-                new RetryPolicyProvider(logger).PageRetryPolicy.ExecuteAsync(async () =>
-                {
-                    logger.LogInformation($"Fetching page ids for pages {i + 1} to {Math.Min(i + batchSize, pagesCount)}");
-                    var data = await HttpHelper.GetTextBody(
-                        $"https://www.rekhta.org/EbookData/GetEbookPageIds/?slug={bookSlug}&lang=1&from={i}&count={batchSize}");
-                    var pageIdData = JsonConvert.DeserializeObject<PageIdData>(data);
-                    pageIds.AddRange(pageIdData.Ids);
-                }).Wait(cancellationToken);
-            }
+            var count = Math.Min(PageIdBatchSize, pagesCount - batchStart);
 
-            return pageIds.ToArray();
+            return await new RetryPolicyProvider(_logger).PageRetryPolicy.ExecuteAsync(async () =>
+            {
+                _logger.LogInformation($"Fetching page ids for pages {batchStart + 1} to {batchStart + count}");
+                var data = await HttpHelper.GetTextBody(
+                    $"https://www.rekhta.org/EbookData/GetEbookPageIds/?slug={bookSlug}&lang=1&from={batchStart}&count={count}");
+                var pageIdData = JsonConvert.DeserializeObject<PageIdData>(data);
+                return pageIdData.Ids.ToArray();
+            });
         }
 
-        private void DownloadPage()
+        private async Task<byte[]> DownloadPageBytesAsync(string pageId, int pageIndex, RekhtaDownloader.BookInfo bookInfo, string fileName, CancellationToken cancellationToken)
         {
-            foreach (var page in _jobs.GetConsumingEnumerable(_cancellationToken))
+            return await new RetryPolicyProvider(_logger).PageRetryPolicy.ExecuteAsync(async () =>
             {
-                new RetryPolicyProvider(_logger).PageRetryPolicy.ExecuteAsync(async () =>
-                {
-                    var data = await HttpHelper.GetTextBody($"https://www.rekhta.org/EbookData/GetEbookFromApi/?pgid={page.PageId}&bkId={BookId}&pgIdx={page.Index}");
-                    page.PageData = JsonConvert.DeserializeObject<PageData>(data);
+                var data = await HttpHelper.GetTextBody($"https://www.rekhta.org/EbookData/GetEbookFromApi/?pgid={pageId}&bkId={bookInfo.BookId}&pgIdx={pageIndex}");
+                var pageData = JsonConvert.DeserializeObject<PageData>(data);
 
-                    var pageImage = await HttpHelper.GetImage($"https://ebooksapi.rekhta.org/images/{page.FolderName}/{page.FileName}");
-                    pageImage = ImageHelper.RearrangeImage(pageImage, page.PageData);
+                var pageImage = await HttpHelper.GetImage($"https://ebooksapi.rekhta.org/images/{bookInfo.ImageFolderName}/{fileName}");
+                pageImage = ImageHelper.RearrangeImage(pageImage, pageData);
 
-                    var filePath = Path.Combine(_outputDirectory, page.FileName);
-                    _outputDirectory.CreateIfDirectoryDoesNotExists();
-                    filePath.MakeSureFileDoesNotExist();
-
-                    File.WriteAllBytes(filePath, pageImage.ToByteArray(_imageQuality));
-
-                    page.PageImagePath = filePath;
-
-                    lock (_lock)
-                    {
-                        _pages.Add(page);
-                        _completeCount++;
-                        _logger.LogInformation($"Downloaded page {_completeCount} of {_pageCount}");
-                    }
-                }).Wait(_cancellationToken);
-            }
+                return pageImage.ToByteArray(_imageQuality);
+            });
         }
 
         private string FindTextBetween(string source, string start, string end)

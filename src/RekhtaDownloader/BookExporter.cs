@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -9,7 +10,6 @@ using iText.Kernel.Geom;
 using iText.Kernel.Pdf;
 using iText.Layout;
 using Microsoft.Extensions.Logging;
-using RekhtaDownloader.Models;
 using SkiaSharp;
 using Image = iText.Layout.Element.Image;
 using Path = System.IO.Path;
@@ -25,11 +25,29 @@ namespace RekhtaDownloader
             _logger = logger;
         }
 
-        public async Task<BookInfo> GetBookInformation(string bookUrl, CancellationToken token = default(CancellationToken))
+        public async Task<Models.BookInfo> GetBookInformation(string bookUrl, CancellationToken token = default(CancellationToken))
         {
             var url = new Uri(bookUrl);
             var book = new Book(url.GetLeftPart(UriPartial.Path), 1, _logger, 90, token);
             return await book.GetBookInformation();
+        }
+
+        // Fetches book metadata once. The returned BookInfo carries everything DownloadPagesAsync
+        // needs, so a caller can persist it and resume a download in a new process without this
+        // method ever being called again for the same book.
+        public async Task<BookInfo> GetBookInfoAsync(string bookUrl, CancellationToken ct = default(CancellationToken))
+        {
+            var book = new Book(bookUrl, 1, _logger, 90, ct);
+            return await book.GetBookInfoAsync();
+        }
+
+        // Streams pages starting at startPage (1 for a fresh download, N+1 to resume after page N),
+        // with at most taskCount pages downloading or buffered at once. Stopping enumeration early
+        // (break, or cancelling ct) cleanly stops further downloads - no separate pause API needed.
+        public IAsyncEnumerable<PageResult> DownloadPagesAsync(string bookUrl, BookInfo bookInfo, int startPage, int taskCount, int imageQuality = 90, CancellationToken ct = default(CancellationToken))
+        {
+            var book = new Book(bookUrl, taskCount, _logger, imageQuality, ct);
+            return book.DownloadPagesAsync(bookInfo, startPage, taskCount, ct);
         }
 
         public async Task<string> DownloadBook(string bookUrl, int taskCount = 10, OutputType output = OutputType.Pdf, string outputPath = null, int imageQuality = 90, CancellationToken token = default(CancellationToken))
